@@ -6,12 +6,16 @@ extern crate libc;
 pub mod linux {
     use std::mem;
  
-    use libc::{CPU_ISSET, CPU_SET, CPU_SETSIZE, cpu_set_t, sched_getaffinity, sched_setaffinity};
+    use libc::{CPU_ISSET, CPU_SET, cpu_set_t, sched_getaffinity, sched_setaffinity};
 
     pub fn set_affinity_mask(mask: usize) {
         let mut set = new_cpu_set();
 
-        unsafe { CPU_SET(core_id.id, &mut set) };
+        for i in 0..32 {
+            if ((1 << i) & mask) > 0 {
+                unsafe { CPU_SET(i, &mut set) };
+            }
+        }
 
         // Set the current thread's core affinity.
         unsafe {
@@ -21,7 +25,7 @@ pub mod linux {
         }
     }
 
-    pub fn get_affinity_mask() -> Option<cpu_set_t> {
+    pub fn get_affinity_mask() -> Option<usize> {
         let mut set = new_cpu_set();
 
         // Try to get current core affinity mask.
@@ -32,11 +36,25 @@ pub mod linux {
         };
 
         if result == 0 {
-            Some(set)
+            let mut bits: usize = 0;
+        
+            unsafe{
+                for i in 0..32 {
+                    if CPU_ISSET(i, &mut set) {
+                        bits = bits | 1 << i;
+                    }
+                }
+            }
+
+            Some(bits)
         }
         else {
             None
         }
+    }
+
+    fn new_cpu_set() -> cpu_set_t {
+        unsafe { mem::zeroed::<cpu_set_t>() }
     }
 }
 
