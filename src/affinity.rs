@@ -82,7 +82,7 @@ pub mod windows {
 
         let res = unsafe {
             winapi::um::winbase::GetProcessAffinityMask(
-                winapi::um::processthreadsapi::GetCurrentProcess(),
+                winapi::um::processthreadsapi::GetCurrentThread(),
                 &mut process_mask as PDWORD_PTR,
                 &mut system_mask as PDWORD_PTR
             )
