@@ -19,4 +19,4 @@ crate-type = ["cdylib"]
 lto = true
 codegen-units = 1
 panic = 'abort'
-opt-level = 'z'
+strip = true
