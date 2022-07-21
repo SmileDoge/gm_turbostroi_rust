@@ -7,7 +7,11 @@ use lua_shared as lua;
 use lua_shared::lua_State;
 use std::{ffi::c_void, mem::size_of, sync::{Arc, atomic::{AtomicBool, Ordering}, mpsc::{Sender, Receiver}, Mutex}, collections::HashMap, time};
 
-use crate::affinity::windows::{set_affinity_mask};
+#[cfg(target_os = "windows")]
+use affinity::windows::{set_affinity_mask};
+
+#[cfg(target_os = "linux")]
+use affinity::linux::{set_affinity_mask};
 
 #[macro_use]
 extern crate lazy_static;
