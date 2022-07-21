@@ -1,15 +1,16 @@
 [package]
 name = "gm_turbostroi_rust"
-version = "3.0.1"
+version = "3.1.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-mlua = {version = "0.7.4", features = ["module", "luajit", "macros"]}
+lua-shared = {git = "http://git.thetha.wtf/ivogel/lua-shared.git"}
 lazy_static = "1.4.0"
-winapi = {version = "0.3.9", features = ["winbase", "processthreadsapi", "basetsd"]}
+winapi = {version = "0.3.9", features = ["winbase", "processthreadsapi", "errhandlingapi", "basetsd"]}
 libc = "0.2.124"
+paste = "1.0.7"
 
 [lib]
 crate-type = ["cdylib"]

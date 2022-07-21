@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 
 #[cfg(target_os = "linux")]
 extern crate libc;
@@ -58,6 +59,7 @@ pub mod linux {
     }
 }
 
+
 #[cfg(target_os = "windows")]
 extern crate winapi;
 
@@ -66,7 +68,6 @@ pub mod windows {
     use winapi::shared::basetsd::{DWORD_PTR, PDWORD_PTR};
 
     pub fn set_affinity_mask(mask: usize) {
-
         // Set core affinity for current thread.
         unsafe {
             winapi::um::winbase::SetThreadAffinityMask(
@@ -75,7 +76,7 @@ pub mod windows {
             );
         }
     }
-
+    
     pub fn get_affinity_mask() -> Option<usize> {
         let mut process_mask: usize = 0;
         let mut system_mask: usize = 0;

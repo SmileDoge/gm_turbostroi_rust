@@ -3,32 +3,38 @@
 #![allow(mutable_transmutes)]
 #![allow(non_upper_case_globals)]
 
-static VERSION: &str = env!("CARGO_PKG_VERSION");
+use lua_shared as lua;
+use lua_shared::lua_State;
+use std::{ffi::c_void, mem::size_of, sync::{Arc, atomic::{AtomicBool, Ordering}, mpsc::{Sender, Receiver}, Mutex}, collections::HashMap, time};
 
-
-#[cfg(target_os = "windows")]
-use affinity::windows::{set_affinity_mask, get_affinity_mask};
-
-#[cfg(target_os = "linux")]
-use affinity::linux::{set_affinity_mask, get_affinity_mask};
-
-use mlua::{self, Error, Lua, Result, UserData, StdLib, LuaOptions, Function, String, AnyUserData};
-use std::collections::HashMap;
-use std::sync::mpsc::{Sender, Receiver};
-use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::{thread, time};
-use std::{ffi::c_void, mem::size_of, os::raw::c_int};
+use crate::affinity::windows::{set_affinity_mask};
 
 #[macro_use]
 extern crate lazy_static;
 
+macro_rules! insert_function {
+    ($state:ident, $name:expr, $func:expr) => {
+        lua_shared::pushfunction($state, $func);
+        lua_shared::setfield($state, -2, lua::cstr!($name));
+    };
+}
+macro_rules! pushglobal {
+    ($state:ident, $name:expr) => {
+        lua_shared::setfield($state, lua::GLOBALSINDEX, lua::cstr!($name));
+    };
+}
+
 mod defines;
 mod affinity;
 
+static VERSION: &str = env!("CARGO_PKG_VERSION");
+
+static mut targetTime: f32 = 0.0;
+static mut rate: u64 = 100;
+
 struct Train {
     pub id: i32,
-    pub state: Lua,
+    pub state: lua_State,
     pub finished: Arc<AtomicBool>,
     pub to_gmod: Sender<Vec<u8>>,
     pub from_gmod: Receiver<Vec<u8>>,
@@ -44,19 +50,29 @@ lazy_static! {
     static ref trains : Mutex<HashMap<i32, SoftTrain>> = Mutex::default();
 }
 
-static mut targetTime: f32 = 0.0;
-static mut rate: u64 = 100;
-
 struct Msg {
     pub data: Option<Vec<u8>>,
     pub offset: usize,
 }
 
-impl UserData for Msg {
-    fn add_fields<'lua, F: mlua::UserDataFields<'lua, Self>>(_fields: &mut F) {}
+impl Msg {
+    pub fn create_msg(state: lua_State) -> Result<i32, Box<dyn std::error::Error>> {
+        unsafe {
+            let size = lua::Lcheckinteger(state, 1) as usize;
+            let msg = Self { data: Some(vec![0; size]), offset: 0 };
+            let udata = lua::newuserdata(state, std::mem::size_of::<Msg>()).cast::<Msg>();
+            udata.write(msg);
+            Self::metatable(state);
+            lua::setmetatable(state, -2);
+        }
+        Ok(1)
+    }
 
-    fn add_methods<'lua, M: mlua::UserDataMethods<'lua, Self>>(methods: &mut M) {
-        methods.add_method_mut("ReadData", |state, this, len: usize| {
+    fn read_data(state: lua_State) -> Result<i32, Box<dyn std::error::Error>> {
+        unsafe {
+            let this = &mut *lua::Lcheckudata(state, 1, lua::cstr!("msgts")).cast::<Self>();
+            let len = lua::Lcheckinteger(state, 2) as usize;
+
             if let Some(data) = this.data.as_ref() {
                 let offset = this.offset;
                 let size_data = len;
@@ -64,326 +80,339 @@ impl UserData for Msg {
                 
                 let final_size = if size_data + offset > size { size - offset } else { size_data };
 
-                let ret = Ok(Some(state.create_string(&data[offset..final_size+offset])?));
+                // let ret = Ok(Some(state.create_string(&data[offset..final_size+offset])?));
+                let ret = &data[offset..final_size+offset];
+                lua::pushlstring(state, ret.as_ptr(), ret.len());
                 this.offset = this.offset + final_size;
-                return ret;
-            } else {
-                return Ok(None);
+                
+                return Ok(1);
             }
-        });
-        methods.add_method_mut(
-            "WriteData",
-            |_, this, val: mlua::String| {
-                if let Some(data) = this.data.as_ref() {
-                    let offset = this.offset;
-                    let size_data = val.as_bytes().len();
-                    let size = data.len();
 
-                    let final_size = if size_data + offset > size { size - offset } else { size_data };
+            return Ok(0);
+        }
+    }
+    
+    fn write_data(state: lua_State) -> Result<i32, Box<dyn std::error::Error>> {
+        unsafe {
+            let this = &mut *lua::Lcheckudata(state, 1, lua::cstr!("msgts")).cast::<Self>();
+            let size = &mut 0;
+            let val = lua::Lchecklstring(state, 2, size);
 
-                    unsafe {
-                        val.as_bytes().as_ptr().copy_to(
-                            data.as_ptr().add(offset) as *mut u8,
-                            final_size
-                        );
-                    }
-
-                    this.offset = this.offset + final_size;
-                }
-                return Ok(());
-            },
-        );
-
-        
-        method_define!(methods, "Int8", i8);
-        method_define!(methods, "Int16", i16);
-        method_define!(methods, "Int32", i32);
-
-        method_define!(methods, "UInt8", u8);
-        method_define!(methods, "UInt16", u16);
-        method_define!(methods, "UInt32", u32);
-
-        method_define!(methods, "Float", f32);
-
-        methods.add_method("Tell", |_, this, ()| {
-            Ok(this.offset)
-        });
-
-        methods.add_method_mut("Seek", |_, this, pos: usize| {
             if let Some(data) = this.data.as_ref() {
-                this.offset = pos.min(data.len());
+                let offset = this.offset;
+                let size_data = *size;
+                let size = data.len();
+        
+                let final_size = if size_data + offset > size { size - offset } else { size_data };
+        
+                val.copy_to(
+                    data.as_ptr().add(offset) as *mut u8,
+                    final_size
+                );
+        
+                this.offset = this.offset + final_size;
             }
 
-            Ok(())
-        });
+            return Ok(0);
+        }
+    }
 
-        // methods.add_method("Info", |_, this, (): ()| {
-        //     let mut size = 0;
+    method_define!("int8", i8);
+    method_define!("int16", i16);
+    method_define!("int32", i32);
 
-        //     if let Some(data) = this.data.as_ref() {
-        //         size = data.len();
-        //     }
+    method_define!("uint8", u8);
+    method_define!("uint16", u16);
+    method_define!("uint32", u32);
 
-        //     return Ok((this.id, size));
-        // })
+    method_define!("float", f32);
+
+    fn tell(state: lua_State) -> Result<i32, Box<dyn std::error::Error>> {
+        unsafe {
+            let this = &mut *lua::Lcheckudata(state, 1, lua::cstr!("msgts")).cast::<Self>();
+            
+            lua::pushinteger(state, this.offset as isize);
+
+            return Ok(1);
+        }
+    }
+
+    fn seek(state: lua_State) -> Result<i32, Box<dyn std::error::Error>> {
+        unsafe {
+            let this = &mut *lua::Lcheckudata(state, 1, lua::cstr!("msgts")).cast::<Self>();
+            let pos = lua::Lcheckinteger(state, 2) as usize;
+
+            if let Some(data) = this.data.as_ref() {
+                this.offset = pos.clamp(0, data.len());
+            }
+
+            return Ok(0);
+        }
+    }
+
+    fn __gc(state: lua_State) -> Result<i32, Box<dyn std::error::Error>> {
+        unsafe {
+            let _ = lua::Lcheckudata(state, 1, lua::cstr!("msgts"))
+                .cast::<Self>()
+                .read();
+            Ok(0)
+        }
+    }
+
+    fn metatable(state: lua_State){
+        unsafe {
+            if lua::Lnewmetatable(state, lua::cstr!("msgts")) {
+                lua::pushvalue(state, -1);
+                lua::setfield(state, -2, lua::cstr!("__index"));
+                insert_function!(state, "__gc", Self::__gc);
+                insert_function!(state, "ReadData", Self::read_data);
+                insert_function!(state, "WriteData", Self::write_data);
+
+                insert_function!(state, "ReadInt8", Self::read_int8);
+                insert_function!(state, "ReadInt16", Self::read_int16);
+                insert_function!(state, "ReadInt32", Self::read_int32);
+
+                insert_function!(state, "WriteInt8", Self::write_int8);
+                insert_function!(state, "WriteInt16", Self::write_int16);
+                insert_function!(state, "WriteInt32", Self::write_int32);
+
+                insert_function!(state, "ReadUInt8", Self::read_uint8);
+                insert_function!(state, "ReadUInt16", Self::read_uint16);
+                insert_function!(state, "ReadUInt32", Self::read_uint32);
+
+                insert_function!(state, "WriteUInt8", Self::write_uint8);
+                insert_function!(state, "WriteUInt16", Self::write_uint16);
+                insert_function!(state, "WriteUInt32", Self::write_uint32);
+
+                insert_function!(state, "ReadFloat", Self::read_float);
+                insert_function!(state, "WriteFloat", Self::write_float);
+
+                insert_function!(state, "Tell", Self::tell);
+                insert_function!(state, "Seek", Self::seek);
+            }
+        }
     }
 }
 
-unsafe fn train_thread(train: Train, code: &Vec<u8>) -> Result<()>{
+unsafe fn train_thread(train: Train, code: &Vec<u8>) -> Result<(), &'static str>{
     let state = train.state;
-
-    let chunk = state.load(std::str::from_utf8_unchecked(code)).set_name("sv_turbostroi_v3.lua")?;
-
+    
     let now = time::Instant::now();
 
-    state.globals().set("TURBOSTROI", true);
-    state.globals().set("TRAIN_ID", train.id);
-    state.globals().set("_TIME", targetTime);
-    state.globals().set(
-        "SysTime",
-        state.create_function(move |_, ()| {
-            Ok(now.elapsed().as_secs_f32())
-        })?
-    );
+    lua::pushboolean(state, 1);
+    pushglobal!(state, "TURBOSTROI");
 
-    state.globals().set(
-        "loadstring", 
-        state.create_function(|lua, (code, name): (String, Option<String>)| {
-            let chunk = lua.load(code.as_ref());
-            if let Some(name) = name{
-                let func = chunk.set_name(name.as_ref())?.into_function();
-                return func;
-            }
+    lua::pushnumber(state, train.id as f64);
+    pushglobal!(state, "TRAIN_ID");
 
-            let func = chunk.into_function();
-            return func;
-        })?
-    );
+    lua::pushnumber(state, targetTime as f64);
+    pushglobal!(state, "_TIME");
 
-    state.globals().set(
-        "CreateMessage",
-        state.create_function(|_, size: usize| {
-            if size > 16 * 1024 * 1024 {
-                return Err(format!("Maximum size 16 MB, Entered size: {} bytes", size))
-                    .map_err(Error::external)?;
-            }
-            if size == 0 {
-                return Ok(None);
-            }
+    lua::pushfunction(state, move |state| {
+        lua::pushnumber(state, now.elapsed().as_secs_f64());
+        Ok(1)
+    });
+    pushglobal!(state, "SysTime");
 
-            return Ok(Some(Msg {
-                data: Some(vec![0; size]),
-                offset: 0,
-            }));
-        })?
-    );
+    lua::pushfunction(state, |state| {
+        let mut size =  0;
+        let code = lua::Lchecklstring(state, 1, &mut size);
 
-    state.globals().set(
-        "SendMessage", 
-        state.create_function(move |_, ud: AnyUserData| {
-            let mut data: Option<Vec<u8>> = None;
-            let msg = ud.borrow::<Msg>()?;
+        let name = lua::Loptlstring(state, 2, lua::cstr!("loadstring-rust"), &mut 0);
 
-            unsafe{
-                std::mem::swap(std::mem::transmute(&msg.data), &mut data);
-            }
+        lua::Lloadbufferx(state, code, size, name, lua::cstr!("t"));
 
-            if let Some(data) = data {
-                train.to_gmod.send(data);
-            }
+        Ok(1)
+    });
+    pushglobal!(state, "loadstring");
 
-            Ok(())
-        })?
-    );
+    lua::pushfunction(state, Msg::create_msg);
+    pushglobal!(state, "CreateMessage");
 
-    state.globals().set(
-        "RecvMessage",
-        state.create_function(move |_, ()| {
-            if let Ok(data) = train.from_gmod.try_recv() {
-                let msg = Msg{data: Some(data), offset: 0};
-                return Ok(Some(msg));
-            }
-            Ok(None)
-        })?
-    );
+    lua::pushfunction(state, move |state| {
+        let mut data: Option<Vec<u8>> = None;
+        let msg = &mut *lua::Lcheckudata(state, 1, lua::cstr!("msgts")).cast::<Msg>();
 
-    state.globals().set(
-        "SetAffinityMask",
-        state.create_function(|_, mask: usize| {
-            set_affinity_mask(mask);
-            Ok(())
-        })?
-    );
+        unsafe{
+            std::mem::swap(std::mem::transmute(&msg.data), &mut data);
+        }
 
-    state.globals().set(
-        "GetAffinityMask",
-        state.create_function(|_, ()| {
-            Ok(get_affinity_mask())
-        })?
-    );
+        if let Some(data) = data {
+            train.to_gmod.send(data);
+        }
 
-    let res = chunk.exec();
+        Ok(0)
+    });
+    pushglobal!(state, "SendMessage");
 
-    if let Err(_err) = res {
-        println!("Turbostroi error loading lua code! (sv_turbostroi_v3.lua)");
-        
-        return Ok(());
+    lua::pushfunction(state, move |state| {
+        if let Ok(data) = train.from_gmod.try_recv() {
+            let msg = Msg{data: Some(data), offset: 0};
+            let udata = lua::newuserdata(state, std::mem::size_of::<Msg>()).cast::<Msg>();
+            udata.write(msg);
+            Msg::metatable(state);
+            lua::setmetatable(state, -2);
+            return Ok(1);
+        }
+        Ok(0)
+    });
+    pushglobal!(state, "RecvMessage");
+
+    lua::pushfunction(state, |state| {
+        let mask = lua::Lcheckinteger(state, 1) as usize;
+        set_affinity_mask(mask);
+
+        Ok(0)
+    });
+    pushglobal!(state, "SetAffinityMask");
+
+    // lua::pushfunction(state, |state| {
+    //     if let Some(mask) = get_affinity_mask() {
+    //         lua::pushinteger(state, mask as isize);
+    //         return Ok(1);
+    //     }
+
+    //     return Ok(0);
+    // });
+    // pushglobal!(state, "GetAffinityMask");
+
+    let status = lua::Lloadbufferx(state, code.as_ptr(), code.len(), lua::cstr!("sv_turbostroi_v3.lua"), lua::cstr!("t"));
+
+    if let lua::Status::Ok = status {
+        if let lua::Status::Ok = lua::pcall(state, 0, 0, 0) {
+
+        }else{
+            lua::close(state);
+            return Ok(())
+        }
     }
 
     while !train.finished.load(Ordering::Relaxed) {
-        // let msg_data = train.from_gmod.try_recv().ok();
+        lua::getfield(state, lua::GLOBALSINDEX, lua::cstr!("Think"));
 
-        // if let Some(msg) = msg_data {
-        //     if let Ok(msgrecv) = state.globals().get::<_, Function>("OnMessageReceive") {
-        //         msgrecv.call::<Msg,()>(Msg {id: 0, data: Some(msg)}); 
-        //     }
-        // }
+        lua::pushnumber(state, targetTime as f64);
+        lua::pushnumber(state, now.elapsed().as_secs_f64());
+        lua::pcall(state, 2, 0, 0);
 
-        if let Ok(think) = state.globals().get::<_, Function>("Think") {
-            think.call::<(f32, f32), ()>((targetTime, now.elapsed().as_secs_f32()));
-        }
-
-        thread::sleep(time::Duration::from_millis(rate));
+        std::thread::sleep(time::Duration::from_millis(rate));
     }
-    
+
     Ok(())
 }
 
 #[no_mangle]
 unsafe extern "C" fn gmod13_open(state: *mut c_void) -> i32 {
-    let lua = Lua::init_from_ptr(state as _);
+    lua::createtable(state, 0, 0);
 
-    fn initialize(lua: &Lua) -> Result<()> {
-        let table = lua.create_table()?;
+    lua::pushlstring(state, VERSION.as_ptr() as _, VERSION.as_bytes().len());
+    lua::setfield(state, -2, lua::cstr!("Version"));
 
-        table.set(
-            "Version",
-            VERSION
-        );
+    insert_function!(state, "CreateMessage", Msg::create_msg);
+    insert_function!(state, "InitializeTrain", |state| {
+        let id = lua::Lcheckinteger(state, 1) as i32;
+        let mut size = 0;
+        let code = lua::Lchecklstring(state, 2, &mut size);
 
-        table.set(
-            "CreateMessage",
-            lua.create_function(|_, size: usize| {
-                if size > 16 * 1024 * 1024 {
-                    return Err(format!("Maximum size 16 MB, Entered size: {} bytes", size))
-                        .map_err(Error::external)?;
-                }
-                if size == 0 {
-                    return Ok(None);
-                }
+        let code_vec = Vec::from_raw_parts(code as *mut u8, size, size);
 
-                return Ok(Some(Msg {
-                    data: Some(vec![0; size]),
-                    offset: 0,
-                }));
-            })?,
-        );
+        let mut lock = trains.lock()?;
 
-        table.set(
-            "InitializeTrain",
-            lua.create_function(|_, (id, code): (i32, String)| {
-                let mut lock = trains.lock().map_err(|err|err.to_string()).map_err(mlua::Error::external)?;
+        if let Some(_train) = lock.get(&id) {
+            return Ok(0);
+        }
+        
+        let (to_gmod, from_thread) = std::sync::mpsc::channel();
+        let (to_thread, from_gmod) = std::sync::mpsc::channel();
+        let finished: Arc<AtomicBool> = Arc::default();
 
-                if let Some(_train) = lock.get(&id) {
-                    return Ok(());
-                }
+        lock.insert(id, SoftTrain { finished: finished.clone(), to_thread, from_thread });
 
-                let (to_gmod, from_thread) = std::sync::mpsc::channel();
-                let (to_thread, from_gmod) = std::sync::mpsc::channel();
-                let finished: Arc<AtomicBool> = Arc::default();
+        std::thread::spawn(move ||{
+            unsafe {
+                let state = lua::newstate();
+                luaL_openlibs(state);
 
-                lock.insert(id, SoftTrain { finished: finished.clone(), to_thread, from_thread });
+                let train = Train{finished, id, state, to_gmod, from_gmod};
+                train_thread(train, &code_vec);
+            }
+        });
 
-                let raw_code = code.as_bytes().to_vec();
+        return Ok(0);
+    });
+    insert_function!(state, "DeinitializeTrain", |state| {
+        let id = lua::Lcheckinteger(state, 1) as i32;
+        let mut lock = trains.lock()?;
 
-                thread::spawn(move ||{
-                    unsafe {
-                        let state = Lua::unsafe_new_with(StdLib::ALL ^ StdLib::PACKAGE, LuaOptions::default());
+        if let Some(train) = lock.get(&id) {
+            train.finished.swap(true, Ordering::Relaxed);
+            lock.remove(&id);
+        }
+        Ok(0)
+    });
+    insert_function!(state, "SetAffinityMask", |state| {
+        let mask = lua::Lcheckinteger(state, 1) as usize;
+        set_affinity_mask(mask);
 
-                        let train = Train{finished, id, state, to_gmod, from_gmod};
-                        train_thread(train, &raw_code);
-                    }
-                });
+        Ok(0)
+    });
+    // insert_function!(state, "GetAffinityMask", |state| {
+    //     if let Some(mask) = get_affinity_mask() {
+    //         lua::pushinteger(state, mask as isize);
+    //         return Ok(1);
+    //     }
 
-                Ok(())
-            })?
-        );
+    //     return Ok(0);
+    // });
+    insert_function!(state, "SetFPSSimulation", |state| {
+        let target_rate = lua::Lcheckinteger(state, 1) as u64;
+        rate = target_rate;
+        
+        Ok(0)
+    });
+    insert_function!(state, "UpdateThink", |state| {
+        let time = lua::Lchecknumber(state, 1);
+        targetTime = time as f32;
+        
+        Ok(0)
+    });
+    insert_function!(state, "SendMessage", |state| {
+        let mut data: Option<Vec<u8>> = None;
+        let msg = &mut *lua::Lcheckudata(state, 1, lua::cstr!("msgts")).cast::<Msg>();
+        let id = lua::Lcheckinteger(state, 2) as i32;
 
-        table.set(
-            "DeinitializeTrain",
-            lua.create_function(|_, id: i32| {
-                let mut lock = trains.lock().map_err(|err|err.to_string()).map_err(mlua::Error::external)?;
+        unsafe{
+            std::mem::swap(std::mem::transmute(&msg.data), &mut data);
+        }
 
-                if let Some(train) = lock.get(&id) {
-                    train.finished.swap(true, Ordering::Relaxed);
-                    lock.remove(&id);
-                }
-                Ok(())
-            })?
-        );
+        if let Some(data) = data {
+            let lock = trains.lock()?;
 
-        table.set(
-            "SetFPSSimulation",
-            lua.create_function(|_, targetRate: u64| {
-                unsafe {
-                    rate = targetRate;
-                }
-                Ok(())
-            })?
-        );
+            if let Some(train) = lock.get(&id) {
+                train.to_thread.send(data);
+            }
+        }
 
-        table.set(
-            "UpdateThink",
-            lua.create_function(|_, time| {
-                unsafe {
-                    targetTime = time;
-                }
-                Ok(())
-            })?
-        );
+        Ok(0)
+    });
+    insert_function!(state, "RecvMessage", |state| {
+        let id = lua::Lcheckinteger(state, 1) as i32;
 
-        table.set(
-            "SendMessage",
-            lua.create_function(|_, (ud, id): (AnyUserData, i32)| {
-                let mut data: Option<Vec<u8>> = None;
-                let msg = ud.borrow::<Msg>()?;
+        let lock = trains.lock()?;
 
-                unsafe{
-                    std::mem::swap(std::mem::transmute(&msg.data), &mut data);
-                }
+        if let Some(train) = lock.get(&id) {
+            if let Ok(data) = train.from_thread.try_recv() {
+                let msg = Msg{data: Some(data), offset: 0};
+                let udata = lua::newuserdata(state, std::mem::size_of::<Msg>()).cast::<Msg>();
+                udata.write(msg);
+                Msg::metatable(state);
+                lua::setmetatable(state, -2);
+                return Ok(1);
+            }
+        }
+        Ok(0)
+    });
 
-                if let Some(data) = data {
-                    let lock = trains.lock().map_err(|err|err.to_string()).map_err(mlua::Error::external)?;
-
-                    if let Some(train) = lock.get(&id) {
-                        train.to_thread.send(data);
-                    }
-                }
-
-                Ok(())
-            })?
-        );
-
-        table.set(
-            "RecvMessage",
-            lua.create_function(|_, id: i32| {
-                let lock = trains.lock().map_err(|err|err.to_string()).map_err(mlua::Error::external)?;
-
-                if let Some(train) = lock.get(&id) {
-                    if let Ok(data) = train.from_thread.try_recv() {
-                        let msg = Msg{data: Some(data), offset: 0};
-                        return Ok(Some(msg));
-                    }
-                }
-                Ok(None)
-            })?
-        );
-
-        lua.globals().set("Turbostroi", table);
-        Ok(())
-    }
-
-    initialize(&lua).expect("Turbostroi: Failed initialize!");
+    lua::setfield(state, lua::GLOBALSINDEX, lua::cstr!("Turbostroi"));
 
     return 0;
 }
@@ -393,11 +422,6 @@ unsafe extern "C" fn gmod13_close(_: *mut c_void) -> i32 {
     return 0;
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn luaopen_io(_: *mut c_void) -> c_int {
-    0
-}
-#[no_mangle]
-pub unsafe extern "C" fn luaopen_ffi(_: *mut c_void) -> c_int {
-    0
+extern "C" {
+    fn luaL_openlibs(state: *mut c_void);
 }
