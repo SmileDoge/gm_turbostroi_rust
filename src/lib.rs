@@ -301,6 +301,8 @@ unsafe fn train_thread(train: Train, code: &Vec<u8>) -> Result<(), &'static str>
         std::thread::sleep(time::Duration::from_millis(rate));
     }
 
+    lua::close(state);
+
     Ok(())
 }
 
