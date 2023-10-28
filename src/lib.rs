@@ -198,7 +198,8 @@ impl Msg {
     }
 }
 
-unsafe fn train_thread(train: Train, code: &Vec<u8>) -> Result<(), &'static str>{
+//unsafe fn train_thread(train: Train, code: &Vec<u8>) -> Result<(), &'static str>{
+unsafe fn train_thread(train: Train) -> Result<(), &'static str>{
     let state = train.state;
     
     let now = time::Instant::now();
@@ -280,16 +281,15 @@ unsafe fn train_thread(train: Train, code: &Vec<u8>) -> Result<(), &'static str>
     // });
     // pushglobal!(state, "GetAffinityMask");
 
-    let status = lua::Lloadbufferx(state, code.as_ptr(), code.len(), lua::cstr!("sv_turbostroi_v3.lua"), lua::cstr!("t"));
+    //let status = lua::Lloadbufferx(state, code.as_ptr(), code.len(), lua::cstr!("sv_turbostroi_v3.lua"), lua::cstr!("t"));
 
-    if let lua::Status::Ok = status {
-        if let lua::Status::Ok = lua::pcall(state, 0, 0, 0) {
-
-        }else{
-            lua::close(state);
-            return Ok(())
-        }
-    }
+  //  if let lua::Status::Ok = status {
+ //       if let lua::Status::Ok = lua::pcall(state, 0, 0, 0) {
+    //    }else{
+   //         lua::close(state);
+  //          return Ok(())
+ //       }
+//    }
 
     while !train.finished.load(Ordering::Relaxed) {
         lua::getfield(state, lua::GLOBALSINDEX, lua::cstr!("Think"));
@@ -316,10 +316,11 @@ unsafe extern "C" fn gmod13_open(state: *mut c_void) -> i32 {
     insert_function!(state, "CreateMessage", Msg::create_msg);
     insert_function!(state, "InitializeTrain", |state| {
         let id = lua::Lcheckinteger(state, 1) as i32;
-        let mut size = 0;
-        let code = lua::Lchecklstring(state, 2, &mut size);
 
-        let code_vec = Vec::from_raw_parts(code as *mut u8, size, size);
+        //let mut size = 0;
+        //let code = lua::Lchecklstring(state, 2, &mut size);
+
+        //let code_vec = Vec::from_raw_parts(code as *mut u8, size, size);
 
         let mut lock = trains.lock()?;
 
@@ -339,7 +340,8 @@ unsafe extern "C" fn gmod13_open(state: *mut c_void) -> i32 {
                 luaL_openlibs(state);
 
                 let train = Train{finished, id, state, to_gmod, from_gmod};
-                train_thread(train, &code_vec);
+                //train_thread(train, &code_vec);
+                train_thread(train);
             }
         });
 
