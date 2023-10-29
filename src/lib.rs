@@ -198,10 +198,7 @@ impl Msg {
     }
 }
 
-//unsafe fn train_thread(train: Train, code: Arc<*const u8>) -> Result<(), &'static str>{
-//unsafe fn train_thread(train: Train, code_vec: &Vec<u8>) -> Result<(), &'static str>{
 unsafe fn train_thread(train: Train, code_str_buf: String, size: usize) -> Result<(), &'static str>{
-//unsafe fn train_thread(train: Train, code_ark: Arc<*const u8>, size: usize) -> Result<(), &'static str>{
     let state = train.state;
 
     
@@ -284,10 +281,6 @@ unsafe fn train_thread(train: Train, code_str_buf: String, size: usize) -> Resul
     // });
     // pushglobal!(state, "GetAffinityMask");
 
-    //let status = lua::Lloadbufferx(state, *ptr, len, lua::cstr!("sv_turbostroi_v3.lua"), lua::cstr!("t"));
-    //let status = lua::Lloadbufferx(state, code_vec.as_ptr(), code_vec.len(), lua::cstr!("sv_turbostroi_v3.lua"), lua::cstr!("t"));
-    //let status = lua::Lloadbufferx(state, *code_ark, size, lua::cstr!("sv_turbostroi_v3.lua"), lua::cstr!("t"));
-
     let c_string = CString::new(code_str_buf).unwrap();
     let c_string_ptr = c_string.as_ptr();
     let status = lua::Lloadbufferx(state, c_string_ptr as *const u8, size, lua::cstr!("sv_turbostroi_v3.lua"), lua::cstr!("t"));
@@ -331,11 +324,6 @@ unsafe extern "C" fn gmod13_open(state: *mut c_void) -> i32 {
         let code_c_str: &CStr = unsafe { CStr::from_ptr(code_c_buf) };
         let code_str_slice: &str = code_c_str.to_str().unwrap();
         let code_str_buf: String = code_str_slice.to_owned();
-        //let code: *const u8 = lua::Lchecklstring(state, 2, &mut size);
-        //let code_ark = Arc::new(code);
-        //let code_slice = slice::from_raw_parts(code as *mut u8, size);
-        //let code_ark: Arc<slice> = Arc::new(code_slice);
-        //let code_vec = Vec::from_raw_parts(code as *mut u8, size, size);
         
         let mut lock = trains.lock()?;
 
@@ -356,12 +344,7 @@ unsafe extern "C" fn gmod13_open(state: *mut c_void) -> i32 {
 
                 let train = Train{finished, id, state, to_gmod, from_gmod};
 
-                //train_thread(train, &code_vec);
                 train_thread(train, code_str_buf, size);
-                //train_thread(train, code_ark, size);
-                //train_thread(train, code_slice);
-
-                //loop {}
         });
 
         return Ok(0);
