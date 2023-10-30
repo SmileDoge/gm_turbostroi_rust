@@ -5,7 +5,7 @@
 
 use lua_shared as lua;
 use lua_shared::lua_State;
-use std::{ffi::c_void, mem::size_of, sync::{Arc, atomic::{AtomicBool, Ordering}, mpsc::{Sender, Receiver}, Mutex}, collections::HashMap, time};
+use std::{slice, ffi::c_void, mem::size_of, sync::{Arc, atomic::{AtomicBool, Ordering}, mpsc::{Sender, Receiver}, Mutex}, collections::HashMap, time};
 
 #[cfg(target_os = "windows")]
 use affinity::windows::{set_affinity_mask};
@@ -198,8 +198,9 @@ impl Msg {
     }
 }
 
-unsafe fn train_thread(train: Train, code: &Vec<u8>) -> Result<(), &'static str>{
+unsafe fn train_thread(train: Train, code: Vec<u8>) -> Result<(), &'static str>{
     let state = train.state;
+
     
     let now = time::Instant::now();
 
@@ -284,7 +285,6 @@ unsafe fn train_thread(train: Train, code: &Vec<u8>) -> Result<(), &'static str>
 
     if let lua::Status::Ok = status {
         if let lua::Status::Ok = lua::pcall(state, 0, 0, 0) {
-
         }else{
             lua::close(state);
             return Ok(())
@@ -316,11 +316,13 @@ unsafe extern "C" fn gmod13_open(state: *mut c_void) -> i32 {
     insert_function!(state, "CreateMessage", Msg::create_msg);
     insert_function!(state, "InitializeTrain", |state| {
         let id = lua::Lcheckinteger(state, 1) as i32;
-        let mut size = 0;
-        let code = lua::Lchecklstring(state, 2, &mut size);
 
-        let code_vec = Vec::from_raw_parts(code as *mut u8, size, size);
-
+        let owned_buf = unsafe {
+            let mut size = 0;
+            let buf_ptr = lua::Lchecklstring(state, 2, &mut size);
+            slice::from_raw_parts(buf_ptr, size).to_vec()
+        };
+        
         let mut lock = trains.lock()?;
 
         if let Some(_train) = lock.get(&id) {
@@ -333,14 +335,14 @@ unsafe extern "C" fn gmod13_open(state: *mut c_void) -> i32 {
 
         lock.insert(id, SoftTrain { finished: finished.clone(), to_thread, from_thread });
 
-        std::thread::spawn(move ||{
-            unsafe {
+        std::thread::spawn(move || {
+
                 let state = lua::newstate();
                 luaL_openlibs(state);
 
                 let train = Train{finished, id, state, to_gmod, from_gmod};
-                train_thread(train, &code_vec);
-            }
+
+                train_thread(train, owned_buf);
         });
 
         return Ok(0);
