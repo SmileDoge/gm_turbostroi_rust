@@ -5,7 +5,7 @@
 
 use lua_shared as lua;
 use lua_shared::lua_State;
-use std::{slice, ffi::c_void, mem::size_of, sync::{Arc, atomic::{AtomicBool, Ordering}, mpsc::{Sender, Receiver}, Mutex}, collections::HashMap, time, ffi::CStr, ffi::c_schar, ffi::CString};
+use std::{ffi::c_void, mem::size_of, sync::{Arc, atomic::{AtomicBool, Ordering}, mpsc::{Sender, Receiver}, Mutex}, collections::HashMap, time, ffi::CStr, ffi::c_schar, ffi::CString};
 
 #[cfg(target_os = "windows")]
 use affinity::windows::{set_affinity_mask};
@@ -282,8 +282,7 @@ unsafe fn train_thread(train: Train, code_str_buf: String, size: usize) -> Resul
     // pushglobal!(state, "GetAffinityMask");
 
     let c_string = CString::new(code_str_buf).unwrap();
-    let c_string_ptr = c_string.as_ptr();
-    let status = lua::Lloadbufferx(state, c_string_ptr as *const u8, size, lua::cstr!("sv_turbostroi_v3.lua"), lua::cstr!("t"));
+    let status = lua::Lloadbufferx(state, c_string.as_ptr() as *const u8, size, lua::cstr!("sv_turbostroi_v3.lua"), lua::cstr!("t"));
 
     if let lua::Status::Ok = status {
         if let lua::Status::Ok = lua::pcall(state, 0, 0, 0) {
